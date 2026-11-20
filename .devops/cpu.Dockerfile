@@ -1,24 +1,9 @@
-ARG UBUNTU_VERSION=26.04
+ARG UBUNTU_VERSION=24.04
 ARG BUILD_DATE=N/A
 ARG APP_VERSION=N/A
 ARG APP_REVISION=N/A
 
-ARG NODE_VERSION=24
-
-FROM docker.io/node:$NODE_VERSION AS web
-
-ARG APP_VERSION
-
-WORKDIR /app/ui/apps/chat
-
-COPY ui/apps/chat/package.json ui/apps/chat/package-lock.json ./
-RUN npm ci
-
-COPY ui/apps/chat/ ./
-# the app compiles Llama UI from its source next to it
-COPY ui/lib/ui/package.json /app/ui/lib/ui/package.json
-COPY ui/lib/ui/src/lib/ /app/ui/lib/ui/src/lib/
-RUN LLAMA_BUILD_NUMBER="$APP_VERSION" npm run build
+# 移除了前端 Node.js 编译阶段，直接进入 C++ 核心编译
 
 FROM docker.io/ubuntu:$UBUNTU_VERSION AS build
 
@@ -31,7 +16,7 @@ WORKDIR /app
 
 COPY . .
 
-COPY --from=web /app/ui/apps/chat/dist ui/apps/chat/dist
+# 移除了 COPY --from=web 前端产物复制指令
 
 RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON; \
@@ -115,12 +100,12 @@ ENTRYPOINT [ "/app/llama-cli" ]
 FROM base AS server
 
 ENV LLAMA_ARG_HOST=0.0.0.0
-ENV LLAMA_ARG_PORT=8080
+ENV LLAMA_ARG_PORT=1002
 
 COPY --from=build /app/full/llama /app/full/llama-server /app/
 
 WORKDIR /app
 
-HEALTHCHECK CMD [ "curl", "-f", "http://localhost:8080/health" ]
+HEALTHCHECK CMD [ "curl", "-f", "http://localhost:1002/health" ]
 
 ENTRYPOINT [ "/app/llama-server" ]

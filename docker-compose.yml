@@ -1,0 +1,35 @@
+services:
+  llama-cpp:
+    image: llama-server
+    container_name: llama-cpp-server
+    ports:
+      - "1002:1002"
+    volumes:
+      - /vol00/Expansion/plain_mount/Share/AI_models:/models:ro
+      - /vol1/1000/docker_clear/Docker/llama/llama-ui-zh:/ui-zh:ro
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "1002"
+      - "--path"
+      - "/ui-zh"
+      - "--models-dir"
+      - "/models"
+      - "--ctx-size"
+      - "4096"
+      - "--models-max"
+      - "1"
+      - "--ui-mcp-proxy"
+      # 添加这行，设置你的API密钥
+      #- "--api-key" 
+      #- "123580llama" # 请替换成你自己的密钥
+      # 删掉 api-key，加上这行允许免密访问（仅限局域网测试）
+      - "--allow-unauthenticated-tools"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:1002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
