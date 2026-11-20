@@ -21,10 +21,6 @@ services:
       - "--models-max"
       - "1"
       - "--ui-mcp-proxy"
-      # 添加这行，设置你的API密钥
-      #- "--api-key" 
-      #- "123580llama" # 请替换成你自己的密钥
-      # 删掉 api-key，加上这行允许免密访问（仅限局域网测试）
       - "--allow-unauthenticated-tools"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:1002/health || exit 1"]
