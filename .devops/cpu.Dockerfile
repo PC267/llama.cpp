@@ -3,54 +3,41 @@ ARG BUILD_DATE=N/A
 ARG APP_VERSION=N/A
 ARG APP_REVISION=N/A
 
-ARG NODE_VERSION=24
-
-FROM docker.io/node:$NODE_VERSION AS web
-
-ARG APP_VERSION
-
-WORKDIR /app/tools/ui
-
-COPY tools/ui/package.json tools/ui/package-lock.json ./
-RUN npm ci
-
-COPY tools/ui/ ./
-RUN LLAMA_BUILD_NUMBER="$APP_VERSION" npm run build
+# 移除了前端 Node.js 编译阶段
 
 FROM docker.io/ubuntu:$UBUNTU_VERSION AS build
 
 ARG TARGETARCH
 
 RUN apt-get update && \
-    apt-get install -y gcc-14 g++-14 build-essential git cmake libssl-dev
-
-ENV CC=gcc-14 CXX=g++-14
+    apt-get install -y build-essential git cmake libssl-dev
 
 WORKDIR /app
 
 COPY . .
 
-COPY --from=web /app/tools/ui/dist tools/ui/dist
-
-RUN if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON; \
+# Compile with a persistent buildkit cache mount over /app/build so that a
+# subsequent build only recompiles what changed (incremental) instead of
+# rebuilding every CPU variant from scratch. Output is staged into /app/lib and
+# /app/full (real image layers) because --mount=type=cache does not persist into
+# the image once this RUN finishes.
+RUN --mount=type=cache,target=/app/build \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$TARGETARCH" = "arm64" ]; then \
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF; \
     else \
         echo "Unsupported architecture"; \
         exit 1; \
     fi && \
-    cmake --build build -j $(nproc)
-
-RUN mkdir -p /app/lib && \
-    find build -name "*.so*" -exec cp -P {} /app/lib \;
-
-RUN mkdir -p /app/full \
-    && cp build/bin/* /app/full \
-    && cp *.py /app/full \
-    && cp -r conversion /app/full \
-    && cp -r gguf-py /app/full \
-    && cp -r requirements /app/full \
-    && cp requirements.txt /app/full \
-    && cp .devops/tools.sh /app/full/tools.sh
+    cmake --build build -j $(nproc) && \
+    mkdir -p /app/lib /app/full && \
+    find build -name "*.so*" -exec cp -P {} /app/lib \; && \
+    cp build/bin/* /app/full/ && \
+    cp *.py /app/full/ && \
+    cp -r conversion /app/full/ && \
+    cp -r gguf-py /app/full/ && \
+    cp -r requirements /app/full/ && \
+    cp requirements.txt /app/full/ && \
+    cp .devops/tools.sh /app/full/tools.sh
 
 ## Base image
 FROM docker.io/ubuntu:$UBUNTU_VERSION AS base
@@ -114,11 +101,12 @@ ENTRYPOINT [ "/app/llama-cli" ]
 FROM base AS server
 
 ENV LLAMA_ARG_HOST=0.0.0.0
+ENV LLAMA_ARG_PORT=1002
 
 COPY --from=build /app/full/llama /app/full/llama-server /app
 
 WORKDIR /app
 
-HEALTHCHECK CMD [ "curl", "-f", "http://localhost:8080/health" ]
+HEALTHCHECK CMD [ "curl", "-f", "http://localhost:1002/health" ]
 
 ENTRYPOINT [ "/app/llama-server" ]

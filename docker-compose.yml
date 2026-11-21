@@ -1,0 +1,38 @@
+services:
+  llama-cpp:
+    image: llama-server-remote
+    container_name: llama-cpp-server
+    ports:
+      - "1002:1002"
+    volumes:
+      - /vol00/Expansion/plain_mount/Share/AI_models:/models:ro
+      - /vol1/1000/docker_clear/Docker/llama/llama-ui-zh:/ui-zh:ro
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "1002"
+      - "--path"
+      - "/ui-zh"
+      - "--models-dir"
+      - "/models"
+      - "--ctx-size"
+      - "4096"
+      - "--models-max"
+      - "1"
+      - "--ui-mcp-proxy"
+
+      # ==========================================
+      # 👇 下面是新增的远程模型配置 👇
+      # ==========================================
+      - "--remote-model"
+      # 格式：自定义名称=URL,key=API密钥,model=远程模型ID
+      # 注意：自定义名称(amd-deepseek)你可以随便起，方便你在UI里认出它
+      - "amd-deepseek=https://developer.amd.com.cn/radeon/api,key=rc-512eb31c3a3a8d34bee051adbad53b9186398c43fb7d8ac9,model=DeepSeek-V4-Flash"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:1002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped

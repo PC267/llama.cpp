@@ -99,6 +99,13 @@ static remote_target parse_remote_url(const std::string & url) {
         if (t.base_path.size() > 1 && t.base_path.back() == '/') {
             t.base_path.pop_back();
         }
+        // If the user put the OpenAI API version (`/v1`) at the end of the base
+        // path, strip it: every remote request path already starts with `/v1/...`,
+        // so keeping it here would produce `/v1/v1/...` (404 on most upstreams).
+        if (t.base_path.size() >= 3 &&
+                t.base_path.compare(t.base_path.size() - 3, 3, "/v1") == 0) {
+            t.base_path.resize(t.base_path.size() - 3);
+        }
     }
     return t;
 }
@@ -450,6 +457,10 @@ void server_models::fetch_remote_metadata_async(
             }
             cli->set_connection_timeout(5, 0);
             cli->set_read_timeout(10, 0);
+            // Follow upstream redirects (e.g. HTTP -> HTTPS, or a path-level
+            // redirect) just like the inference forwarding proxy does; otherwise a
+            // 301/302 to /v1/models is reported as an error and metadata is lost.
+            cli->set_follow_location(true);
 
             httplib::Headers hdrs;
             if (!api_key.empty()) {
@@ -1947,6 +1958,35 @@ void server_models_routes::init_routes() {
         auto error_res = std::make_unique<server_http_res>();
         if (!router_validate_model(name, models, autoload, error_res)) {
             return error_res;
+        }
+        // Remote entries have no local /props: upstreams (vLLM, OpenAI, …) don't
+        // expose the llama.cpp props schema. The UI polls /props?model=<name>
+        // while a model is selected, so answer it with a synthetic response built
+        // from the cached upstream metadata fetched at boot — otherwise the UI
+        // logs a 400 storm and fails to render per-model info.
+        if (req.path == "/props") {
+            auto meta = models.get_meta(name);
+            if (meta.has_value() && meta->is_remote()) {
+                auto res = std::make_unique<server_http_res>();
+                json upstream = meta->loaded_info.is_object() && meta->loaded_info.contains("upstream")
+                    ? meta->loaded_info["upstream"]
+                    : json::object();
+                int64_t n_ctx = 0;
+                if (upstream.contains("max_model_len")) {
+                    try { n_ctx = upstream["max_model_len"].get<int64_t>(); } catch (...) {}
+                }
+                res_ok(res, {
+                    {"model_alias", name},
+                    {"model_path",  "remote:" + (meta->remote.has_value() ? meta->remote->url : std::string("remote"))},
+                    {"default_generation_settings", {
+                        {"params", json{}},
+                        {"n_ctx",  n_ctx},
+                    }},
+                    {"remote", true},
+                    {"upstream", upstream},
+                });
+                return res;
+            }
         }
         return models.proxy_request(req, method, name, false);
     };

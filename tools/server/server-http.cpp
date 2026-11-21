@@ -8,6 +8,7 @@
 #include <cpp-httplib/httplib.h>
 
 #include <functional>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <string>
@@ -190,7 +191,7 @@ bool server_http_context::init(const common_params & params) {
         return endpoints;
     }();
 
-    auto middleware_validate_api_key = [api_keys = params.api_keys](const httplib::Request & req, httplib::Response & res) {
+    auto middleware_validate_api_key = [api_keys = params.api_keys, public_path = params.public_path](const httplib::Request & req, httplib::Response & res) {
         // If API key is not set, skip validation
         if (api_keys.empty()) {
             return true;
@@ -199,6 +200,18 @@ bool server_http_context::init(const common_params & params) {
         // If path is public or a UI asset, skip validation
         if (get_public_endpoints.count(req.path)) {
             return true;
+        }
+
+        // Static files served via --path (public_path) are public: the browser
+        // must be able to load index.html and the immutable bundles before any
+        // client-side auth can take place, and these files are not registered in
+        // get_public_endpoints (that list only knows about built-in assets).
+        if (!public_path.empty() && req.path != "/" &&
+                !req.path.empty() && req.path[0] == '/') {
+            const std::string file = public_path + req.path;
+            if (std::filesystem::exists(file) && std::filesystem::is_regular_file(file)) {
+                return true;
+            }
         }
 
         // Check for API key in the Authorization header
