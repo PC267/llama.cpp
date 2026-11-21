@@ -39,6 +39,85 @@ extern char **environ;
 
 #define DEFAULT_STOP_TIMEOUT 10 // seconds
 
+// Parsed remote upstream URL (scheme://host[:port][/base_path]).
+struct remote_target {
+    std::string scheme;   // "http" or "https"
+    std::string host;
+    int         port;
+    std::string base_path; // may be empty; prepended to req.path
+};
+
+static remote_target parse_remote_url(const std::string & url) {
+    remote_target t{};
+    size_t pos = 0;
+    auto scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) {
+        throw std::runtime_error("remote URL missing scheme: " + url);
+    }
+    t.scheme = url.substr(0, scheme_end);
+    if (t.scheme != "http" && t.scheme != "https") {
+        throw std::runtime_error("remote URL scheme must be http or https: " + url);
+    }
+    pos = scheme_end + 3;
+    auto path_start = url.find('/', pos);
+    std::string authority = (path_start == std::string::npos)
+        ? url.substr(pos)
+        : url.substr(pos, path_start - pos);
+    if (authority.empty()) {
+        throw std::runtime_error("remote URL missing host: " + url);
+    }
+    auto colon = authority.find(':');
+    if (colon == std::string::npos) {
+        t.host = authority;
+        t.port = (t.scheme == "https") ? 443 : 80;
+    } else {
+        t.host = authority.substr(0, colon);
+        try {
+            t.port = std::stoi(authority.substr(colon + 1));
+        } catch (...) {
+            throw std::runtime_error("remote URL has invalid port: " + url);
+        }
+    }
+    if (path_start != std::string::npos) {
+        t.base_path = url.substr(path_start);
+        // strip a single trailing '/' so req.path can join cleanly
+        if (t.base_path.size() > 1 && t.base_path.back() == '/') {
+            t.base_path.pop_back();
+        }
+        // If the user put the OpenAI API version (`/v1`) at the end of the base
+        // path, strip it: every remote request path already starts with `/v1/...`,
+        // so keeping it here would produce `/v1/v1/...` (404 on most upstreams).
+        if (t.base_path.size() >= 3 &&
+                t.base_path.compare(t.base_path.size() - 3, 3, "/v1") == 0) {
+            t.base_path.resize(t.base_path.size() - 3);
+        }
+    }
+    return t;
+}
+
+// Inference endpoints that make sense to forward to a remote OpenAI-compatible
+// upstream. Anything else (load/unload/slots/metrics/apply-template/tokenize/
+// detokenize/lora) returns 400 for remote entries since the upstream has no
+// equivalent semantics in our control plane.
+static bool remote_allows_path(const std::string & path) {
+    // /props is llama.cpp-specific; OAI-compatible upstreams (vLLM, OpenAI, etc.)
+    // don't expose it. The UI reads remote metadata from /v1/models["upstream"]
+    // (router-side cache) instead, and proxy_request short-circuits /props on
+    // remote entries to a synthetic response.
+    static const std::set<std::string> allowed = {
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/embeddings",
+        "/v1/messages",
+        "/v1/responses",
+        "/chat/completions",
+        "/completions",
+        "/embeddings",
+        "/completion",
+    };
+    return allowed.count(path) > 0;
+}
+
 // note: SIGPIPE is ignored by the server
 static void request_child_exit(server_subproc & proc) {
     FILE * stdin_file = proc.sproc.stdin_file();

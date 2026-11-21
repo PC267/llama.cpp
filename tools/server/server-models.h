@@ -71,6 +71,14 @@ static std::string server_model_source_to_string(server_model_source source) {
     }
 }
 
+// Remote (proxy-only) model entry: no child process is spawned; requests are
+// forwarded to an external OpenAI-compatible server (e.g. vLLM).
+struct server_model_remote {
+    std::string url;       // e.g. "http://127.0.0.1:8082" or "https://host/base"
+    std::string api_key;   // bearer token to inject as Authorization (already env-expanded)
+    std::string model_id;  // optional: overrides JSON "model" before forwarding
+};
+
 struct server_model_meta {
     server_model_source source = SERVER_MODEL_SOURCE_CACHE;
     common_preset preset;
@@ -92,20 +100,30 @@ struct server_model_meta {
     // only populated with --models-memory-margin, see server_models_sched
     server_model_memory_info memory = {};
 
+    // set ⇒ this is a remote entry (no child process)
+    std::optional<server_model_remote> remote;
+
+    bool is_remote() const {
+        return remote.has_value();
+    }
+
     bool is_ready() const {
-        return status == SERVER_MODEL_STATUS_LOADED;
+        return is_remote() || status == SERVER_MODEL_STATUS_LOADED;
     }
 
     bool is_running() const {
-        return status == SERVER_MODEL_STATUS_LOADED || status == SERVER_MODEL_STATUS_LOADING || status == SERVER_MODEL_STATUS_SLEEPING;
+        return is_remote()
+            || status == SERVER_MODEL_STATUS_LOADED
+            || status == SERVER_MODEL_STATUS_LOADING
+            || status == SERVER_MODEL_STATUS_SLEEPING;
     }
 
     bool is_ready_or_sleep() const {
-        return status == SERVER_MODEL_STATUS_LOADED || status == SERVER_MODEL_STATUS_SLEEPING;
+        return is_remote() || status == SERVER_MODEL_STATUS_LOADED || status == SERVER_MODEL_STATUS_SLEEPING;
     }
 
     bool is_failed() const {
-        return status == SERVER_MODEL_STATUS_UNLOADED && exit_code != 0;
+        return !is_remote() && status == SERVER_MODEL_STATUS_UNLOADED && exit_code != 0;
     }
 
     void update_args(common_preset_context & ctx_presets, std::string bin_path);
@@ -268,6 +286,16 @@ private:
 
     // not thread-safe, caller must hold mutex
     void add_model(server_model_meta && meta);
+
+    // For remote entries: fire-and-forget background fetch of the upstream's
+    // /v1/models, storing the matching entry under loaded_info["upstream"].
+    // Caller passes the values directly because this can be invoked while the
+    // calling thread holds `mutex` (which is non-reentrant).
+    void fetch_remote_metadata_async(
+        const std::string & name,
+        const std::string & url,
+        const std::string & api_key,
+        const std::string & upstream_model);
 
     // ask the monitor to stop a running instance; send_exit is false for a child that was already force-killed
     // not thread-safe, caller must hold mutex
@@ -445,7 +473,14 @@ struct server_http_proxy : server_http_res {
                       const std::function<bool()> should_stop,
                       int32_t timeout_read,
                       int32_t timeout_write,
-                      const std::string & resolved_addr = "" // if set: connect to this address only, do not follow redirects
+                      const std::string & resolved_addr = "", // if set: connect to this address only, do not follow redirects
+                      // Optional response-body substring rewrite. Applied to every
+                      // chunk before relay; a tail buffer handles boundary splits.
+                      // Used by remote proxies to rewrite `"model":"<upstream-id>"`
+                      // back to the router-side name so clients never see the
+                      // upstream's internal id.
+                      const std::string & body_rewrite_from = "",
+                      const std::string & body_rewrite_to   = ""
                       );
     ~server_http_proxy() {
         if (cleanup_pipes) {
